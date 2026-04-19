@@ -36,6 +36,24 @@ function generateIdentity() {
   };
 }
 
+// Validate a client-supplied identity. Clients persist their identity in
+// localStorage and send it back on (re)connect so we can reuse it -- this
+// keeps your name/avatar stable across refreshes AND makes React StrictMode's
+// dev-mode double-mount a no-op instead of spawning ghost host identities.
+function isValidIdentity(ident) {
+  if (!ident || typeof ident !== 'object') return false;
+  if (typeof ident.userId !== 'string' || !/^u_[a-z0-9]{4,16}$/.test(ident.userId)) {
+    return false;
+  }
+  if (typeof ident.name !== 'string' || ident.name.length === 0 || ident.name.length > 40) {
+    return false;
+  }
+  if (typeof ident.avatar !== 'string' || ident.avatar.length === 0 || ident.avatar.length > 8) {
+    return false;
+  }
+  return true;
+}
+
 function generateRoomCode() {
   // Skip ambiguous chars (0/O, 1/I) so codes are easy to type.
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -226,6 +244,34 @@ app.get('/rooms/:code', (req, res) => {
   res.json({ exists: true, memberCount: room.members.size });
 });
 
+// Dev-only inspector. Guarded by a ?key=dev query param so it's not
+// completely public. Use this during live demos to verify who is host,
+// which sockets are connected, and what's in the queue.
+app.get('/debug/rooms', (req, res) => {
+  if (req.query.key !== 'dev') {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  const snapshot = Array.from(rooms.values()).map((room) => ({
+    code: room.code,
+    hostUserId: room.hostUserId,
+    memberCount: room.members.size,
+    members: Array.from(room.members.values()).map((m) => ({
+      userId: m.userId,
+      name: m.name,
+      avatar: m.avatar,
+      socketId: m.socketId,
+      isHost: m.userId === room.hostUserId,
+    })),
+    currentTrack: room.currentTrack
+      ? `${room.currentTrack.name} - ${room.currentTrack.artist}`
+      : null,
+    queueLength: room.queue.length,
+    vibe: room.vibe,
+    advancing: !!room.advancing,
+  }));
+  res.json({ rooms: snapshot });
+});
+
 app.get('/test-ai', async (req, res) => {
   try {
     const response = await askAI('Say one hype DJ sentence.');
@@ -406,7 +452,7 @@ setInterval(() => {
 io.on('connection', (socket) => {
   console.log('Socket connected:', socket.id);
 
-  socket.on('join_room', ({ roomCode } = {}) => {
+  socket.on('join_room', ({ roomCode, existingIdentity } = {}) => {
     try {
       const code = String(roomCode || '').toUpperCase();
       const room = rooms.get(code);
@@ -415,37 +461,90 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const identity = generateIdentity();
-      const member = {
-        ...identity,
-        socketId: socket.id,
-        joinedAt: Date.now(),
-      };
-      room.members.set(identity.userId, member);
+      // Three possible paths:
+      //   1. Client sent a valid existingIdentity AND that userId is already
+      //      in the room (reconnect / StrictMode remount / multi-tab). We
+      //      just update the socketId and treat it as a no-op rejoin.
+      //   2. Client sent a valid existingIdentity but they're not yet in
+      //      the room. Reuse the identity so names/avatars stay stable.
+      //   3. Nothing sent (or invalid). Generate a fresh identity.
+      let identity;
+      let rejoined = false;
+      if (isValidIdentity(existingIdentity)) {
+        const existing = room.members.get(existingIdentity.userId);
+        if (existing) {
+          existing.socketId = socket.id;
+          identity = {
+            userId: existing.userId,
+            name: existing.name,
+            avatar: existing.avatar,
+          };
+          rejoined = true;
+        } else {
+          identity = {
+            userId: existingIdentity.userId,
+            name: existingIdentity.name,
+            avatar: existingIdentity.avatar,
+          };
+          room.members.set(identity.userId, {
+            ...identity,
+            socketId: socket.id,
+            joinedAt: Date.now(),
+          });
+        }
+      } else {
+        identity = generateIdentity();
+        room.members.set(identity.userId, {
+          ...identity,
+          socketId: socket.id,
+          joinedAt: Date.now(),
+        });
+      }
+
       room.emptySince = null;
 
-      if (!room.hostUserId) room.hostUserId = identity.userId;
+      // Host assignment: first member in a host-less room claims the crown.
+      // Log it explicitly so the backend terminal makes it obvious who's
+      // actually host during live debugging.
+      const becameHost = !room.hostUserId;
+      if (becameHost) {
+        room.hostUserId = identity.userId;
+        console.log(
+          `[${code}] ${identity.name} (${identity.userId}) is now HOST`
+        );
+      }
 
       socket.join(code);
       socket.data.userId = identity.userId;
       socket.data.roomCode = code;
 
+      const isHost = room.hostUserId === identity.userId;
+
       socket.emit('joined', {
         userId: identity.userId,
         name: identity.name,
         avatar: identity.avatar,
-        isHost: room.hostUserId === identity.userId,
+        isHost,
       });
 
       socket.emit('room_state', roomSnapshot(room));
 
-      socket.to(code).emit('user_joined', {
-        userId: identity.userId,
-        name: identity.name,
-        avatar: identity.avatar,
-      });
-
-      console.log(`[${code}] ${identity.name} joined (${room.members.size} members)`);
+      // Only broadcast user_joined to others on a FRESH join, not a rejoin.
+      // Rejoins are an implementation detail -- nobody needs a toast for it.
+      if (!rejoined) {
+        socket.to(code).emit('user_joined', {
+          userId: identity.userId,
+          name: identity.name,
+          avatar: identity.avatar,
+        });
+        console.log(
+          `[${code}] ${identity.name} joined (${room.members.size} members, host=${room.hostUserId})`
+        );
+      } else {
+        console.log(
+          `[${code}] ${identity.name} reconnected (host=${room.hostUserId})`
+        );
+      }
     } catch (err) {
       console.error('join_room error:', err);
       socket.emit('join_error', { error: err.message });
@@ -624,12 +723,24 @@ Return 1-3 queries.
     if (!room) return;
 
     const member = room.members.get(userId);
+    if (!member) return;
+
+    // StrictMode / reconnect race: if another socket has already taken over
+    // this identity, the current disconnect is stale -- don't evict the
+    // member or we'll orphan a perfectly good active client.
+    if (member.socketId !== socket.id) {
+      console.log(
+        `[${roomCode}] stale disconnect for ${member.name} (socket ${socket.id} superseded by ${member.socketId})`
+      );
+      return;
+    }
+
     room.members.delete(userId);
 
     io.to(roomCode).emit('user_left', {
       userId,
-      name: member?.name,
-      avatar: member?.avatar,
+      name: member.name,
+      avatar: member.avatar,
     });
 
     // Naive host handoff: next member in insertion order becomes host.
@@ -637,6 +748,11 @@ Return 1-3 queries.
       const next = room.members.values().next().value;
       room.hostUserId = next?.userId ?? null;
       io.to(roomCode).emit('room_update', { hostUserId: room.hostUserId });
+      if (room.hostUserId) {
+        console.log(
+          `[${roomCode}] host handoff: ${next.name} (${next.userId}) is now HOST`
+        );
+      }
     }
 
     if (room.members.size === 0) {
@@ -644,7 +760,7 @@ Return 1-3 queries.
     }
 
     console.log(
-      `[${roomCode}] ${member?.name ?? userId} left (${room.members.size} members)`
+      `[${roomCode}] ${member.name} left (${room.members.size} members, host=${room.hostUserId})`
     );
   });
 });

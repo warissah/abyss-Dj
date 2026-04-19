@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { socket } from "../socket.js";
-import { saveIdentity } from "../lib/identity.js";
+import { loadIdentity, saveIdentity } from "../lib/identity.js";
 import HostView from "./HostView.jsx";
 import GuestView from "./GuestView.jsx";
 
@@ -66,8 +66,18 @@ export default function Room({ code }) {
   }, []);
 
   useEffect(() => {
-    socket.connect();
-    socket.emit("join_room", { roomCode: code });
+    // Send join_room every time the socket (re)connects. This covers:
+    //   - the initial connect on mount
+    //   - React StrictMode's dev-mode disconnect + reconnect
+    //   - real-world network blips (WiFi drops, tab backgrounding on iOS)
+    // Always include the persisted identity so the server can reuse our
+    // userId/name/avatar instead of spawning a fresh ghost on every reconnect.
+    const onConnect = () => {
+      socket.emit("join_room", {
+        roomCode: code,
+        existingIdentity: loadIdentity(),
+      });
+    };
 
     const onJoined = (payload) => {
       setMe(payload);
@@ -143,6 +153,9 @@ export default function Room({ code }) {
       setTimeout(() => setError(""), 3000);
     };
 
+    // Register `connect` BEFORE calling socket.connect() so the initial
+    // connection's `connect` event is never missed.
+    socket.on("connect", onConnect);
     socket.on("joined", onJoined);
     socket.on("room_state", onRoomState);
     socket.on("user_joined", onUserJoined);
@@ -153,7 +166,14 @@ export default function Room({ code }) {
     socket.on("join_error", onJoinError);
     socket.on("add_song_error", onAddSongError);
 
+    socket.connect();
+    // If the socket was already connected (HMR / StrictMode remount on an
+    // already-open singleton), the `connect` event won't fire again, so
+    // manually trigger a rejoin here too.
+    if (socket.connected) onConnect();
+
     return () => {
+      socket.off("connect", onConnect);
       socket.off("joined", onJoined);
       socket.off("room_state", onRoomState);
       socket.off("user_joined", onUserJoined);
