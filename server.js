@@ -87,6 +87,14 @@ function createRoom() {
     vibe: 'party',
     emptySince: Date.now(),
     advancing: false,
+    // Auto-continuation: when queue gets low the 1s DJ tick fires off
+    // extendQueueWithAI() which asks Gemini for matching tracks. These
+    // flags keep us from hammering the API in a tight loop.
+    extending: false,
+    extendCooldownUntil: 0,
+    // Ring buffer of recently-played tracks so the AI doesn't loop the
+    // same 2 songs forever when auto-extending.
+    recentTracks: [],
   };
   rooms.set(code, room);
   return room;
@@ -358,12 +366,137 @@ Respond with STRICT JSON only:
   return 0;
 }
 
+// Preemptive auto-continuation. Called from the 1s DJ tick when the queue
+// is about to run dry. Asks Gemini for 1-2 tracks that continue the vibe of
+// what's currently playing, runs them through iTunes, and pushes real
+// playable tracks into the queue. Fire-and-forget from the caller's POV --
+// room.extending guards reentry, and a short cooldown prevents tight retry
+// loops when Gemini or iTunes are misbehaving.
+async function extendQueueWithAI(room) {
+  if (room.extending) return;
+  if (Date.now() < (room.extendCooldownUntil || 0)) return;
+  if (!room.currentTrack) return;
+  if (room.members.size === 0) return;
+
+  room.extending = true;
+  try {
+    const curVibe = room.currentTrack.vibe ? ` (vibe: ${room.currentTrack.vibe})` : '';
+    const current = `${room.currentTrack.name} by ${room.currentTrack.artist}${curVibe}`;
+    const recent = (room.recentTracks || [])
+      .slice(0, 5)
+      .map((t) => `${t.name} by ${t.artist}`)
+      .join(', ');
+    const queued = room.queue
+      .map((t) => `${t.name} by ${t.artist}`)
+      .join(', ');
+
+    const aiRaw = await askAI(
+      `
+You are the DJ for a shared listening room. The queue is running low and
+you need to keep the music going.
+
+Currently playing: ${current}
+Room vibe: ${room.vibe || 'unknown'}
+Recently played (don't repeat these): ${recent || 'nothing yet'}
+Already in queue (don't duplicate): ${queued || 'nothing'}
+
+Suggest TWO real, well-known songs that would smoothly continue this vibe.
+Prefer popular tracks that Apple's iTunes catalog is likely to have.
+Format each as "<song title> <artist>".
+
+Respond with STRICT JSON only:
+{"queries": ["<song title artist>", "<song title artist>"]}
+`,
+      { json: true, maxOutputTokens: 128, temperature: 0.85 }
+    );
+
+    let parsed;
+    try {
+      const cleaned = String(aiRaw || '')
+        .trim()
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/```\s*$/i, '');
+      parsed = JSON.parse(cleaned);
+    } catch {
+      room.extendCooldownUntil = Date.now() + 10_000;
+      return;
+    }
+
+    const queries = Array.isArray(parsed?.queries)
+      ? parsed.queries
+          .filter((q) => typeof q === 'string' && q.trim())
+          .slice(0, 2)
+      : [];
+    if (queries.length === 0) {
+      room.extendCooldownUntil = Date.now() + 10_000;
+      return;
+    }
+
+    const added = [];
+    for (const q of queries) {
+      try {
+        const track = await searchTrack(q);
+        if (!track) continue;
+        // Drop duplicates: already queued, currently playing, or recently played.
+        const dupe =
+          room.currentTrack?.id === track.id ||
+          room.queue.some((t) => t.id === track.id) ||
+          (room.recentTracks || []).some((t) => t.id === track.id);
+        if (dupe) continue;
+        track.addedBy = 'ai';
+        track.autoAdded = true;
+        room.queue.push(track);
+        added.push(track);
+      } catch (err) {
+        console.warn(
+          `[${room.code}] auto-extend search failed for "${q}":`,
+          err.message
+        );
+      }
+    }
+
+    if (added.length === 0) {
+      // All picks were dupes or all searches failed. Back off briefly so we
+      // don't re-burn the same prompt on the very next tick.
+      room.extendCooldownUntil = Date.now() + 15_000;
+      return;
+    }
+
+    console.log(
+      `[${room.code}] DJ auto-extended queue with ${added.length}: ${added
+        .map((t) => t.name)
+        .join(', ')}`
+    );
+    emitQueueUpdated(room);
+    for (const t of added) tagVibeAsync(room, t);
+  } catch (err) {
+    console.warn(`[${room.code}] auto-extend failed:`, err.message);
+    room.extendCooldownUntil = Date.now() + 20_000;
+  } finally {
+    room.extending = false;
+  }
+}
+
 // Async because it may await the AI picker. `room.advancing` guards against
 // the 1s auto-DJ tick re-entering while we're mid-pick.
 async function advanceTrack(room) {
   if (room.advancing) return;
   room.advancing = true;
   try {
+    // Push the outgoing track onto the recents ring buffer so the
+    // auto-continuation prompt can avoid repeating it.
+    if (room.currentTrack) {
+      room.recentTracks = [
+        {
+          id: room.currentTrack.id,
+          name: room.currentTrack.name,
+          artist: room.currentTrack.artist,
+        },
+        ...(room.recentTracks || []),
+      ].slice(0, 10);
+    }
+
     let next = null;
     if (room.queue.length > 0) {
       const idx = await pickNextTrackIndex(room);
@@ -420,18 +553,29 @@ setInterval(() => {
   const now = Date.now();
   for (const room of rooms.values()) {
     if (room.members.size === 0) continue;
-    if (room.advancing) continue;
 
     const hasTrack = !!room.currentTrack;
     const elapsed = hasTrack && now - room.trackStartedAt >= room.trackDurationMs - 200;
 
-    if (!hasTrack && room.queue.length > 0) {
-      advanceTrack(room).catch((err) =>
-        console.error(`[${room.code}] advance error:`, err)
-      );
-    } else if (elapsed) {
-      advanceTrack(room).catch((err) =>
-        console.error(`[${room.code}] advance error:`, err)
+    if (!room.advancing) {
+      if (!hasTrack && room.queue.length > 0) {
+        advanceTrack(room).catch((err) =>
+          console.error(`[${room.code}] advance error:`, err)
+        );
+      } else if (elapsed) {
+        advanceTrack(room).catch((err) =>
+          console.error(`[${room.code}] advance error:`, err)
+        );
+      }
+    }
+
+    // Preemptive auto-continuation: if something is playing but the queue
+    // is running dry, ask Gemini (in the background) to suggest more.
+    // Runs in parallel with the advance logic above; gated by its own
+    // flags so a slow Gemini call can't block advance or re-fire every tick.
+    if (hasTrack && room.queue.length <= 1) {
+      extendQueueWithAI(room).catch((err) =>
+        console.error(`[${room.code}] extend error:`, err)
       );
     }
   }
