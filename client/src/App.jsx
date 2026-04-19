@@ -21,5 +21,5 @@ export default function App() {
   }, []);
 
   if (!roomCode) return <Landing />;
-  return <Room code={roomCode} />;
+  return <Room key={roomCode} code={roomCode} />;
 }

@@ -9,12 +9,13 @@ import EnergyBar from "./EnergyBar.jsx";
 import FakeActivityFeed from "./FakeActivityFeed.jsx";
 import OceanAmbience from "./OceanAmbience.jsx";
 import { QRCodeSVG } from "qrcode.react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 // Full host dashboard: now-playing disc, queue, vibe orb, DJ chat bar, audio.
 // This is the original Room layout, now rendered only when me.isHost === true.
 export default function HostView({
   code,
+  joinUrl,
   me,
   state,
   bubbles,
@@ -27,9 +28,6 @@ export default function HostView({
   error,
 }) {
   const [shareOpen, setShareOpen] = useState(false);
-  const joinUrl = useMemo(() => {
-    return `${window.location.origin}${window.location.pathname}?room=${code}`;
-  }, [code]);
 
   return (
     <div className="ocean">
@@ -89,21 +87,28 @@ export default function HostView({
             <div className="sharePopoverCard">
               <div className="sharePopoverTitle">Scan to join Room {code}</div>
               <div className="sharePopoverQr">
-                <QRCodeSVG
-                  value={joinUrl}
-                  size={220}
-                  level="M"
-                  includeMargin
-                />
+                {joinUrl ? (
+                  <QRCodeSVG
+                    value={joinUrl}
+                    size={220}
+                    level="M"
+                    includeMargin
+                  />
+                ) : (
+                  <div className="sharePopoverQrPending">
+                    Finding this computer on the network…
+                  </div>
+                )}
               </div>
-              <div className="sharePopoverUrl" title={joinUrl}>
-                {joinUrl}
+              <div className="sharePopoverUrl" title={joinUrl || ""}>
+                {joinUrl || "—"}
               </div>
               <div className="sharePopoverActions">
                 <button
                   type="button"
                   className="sharePopoverCopyBtn"
                   onClick={copyLink}
+                  disabled={!joinUrl}
                 >
                   Copy link
                 </button>

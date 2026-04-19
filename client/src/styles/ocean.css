@@ -562,6 +562,25 @@
   padding: 10px;
 }
 
+.sharePopoverQrPending {
+  min-height: 220px;
+  width: 100%;
+  max-width: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.sharePopoverCopyBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .sharePopoverUrl {
   margin-top: 10px;
   font-size: 11px;

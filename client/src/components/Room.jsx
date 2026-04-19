@@ -1,6 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { socket } from "../socket.js";
 import { loadIdentity, saveIdentity } from "../lib/identity.js";
+import {
+  defaultJoinUrl,
+  isLoopbackHostname,
+  resolveShareJoinUrl,
+} from "../lib/joinUrl.js";
 import HostView from "./HostView.jsx";
 import GuestView from "./GuestView.jsx";
 
@@ -112,12 +123,33 @@ export default function Room({ code }) {
   const [toasts, setToasts] = useState([]);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [lanJoinUrl, setLanJoinUrl] = useState(null);
   const [localEnergy, setLocalEnergy] = useState(30);
+
+  const shareJoinUrl = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    if (!isLoopbackHostname(window.location.hostname)) {
+      return defaultJoinUrl(code);
+    }
+    return lanJoinUrl;
+  }, [code, lanJoinUrl]);
 
   const stateRef = useRef(state);
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    if (!isLoopbackHostname(window.location.hostname)) return undefined;
+    let cancelled = false;
+    resolveShareJoinUrl(code).then((u) => {
+      if (!cancelled) setLanJoinUrl(u);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [code]);
 
   const pulsesRef = useRef([]);
   const bumpEnergy = useCallback(() => {
@@ -310,9 +342,9 @@ export default function Room({ code }) {
   }, [code, pushToast, bumpEnergy]);
 
   const copyLink = async () => {
+    if (shareJoinUrl === null) return;
     try {
-      const url = `${window.location.origin}${window.location.pathname}?room=${code}`;
-      await navigator.clipboard.writeText(url);
+      await navigator.clipboard.writeText(shareJoinUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -397,6 +429,7 @@ export default function Room({ code }) {
     return (
       <HostView
         code={code}
+        joinUrl={shareJoinUrl}
         me={me}
         state={state}
         bubbles={bubbles}

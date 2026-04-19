@@ -1,8 +1,79 @@
 const express = require('express');
 const http = require('http');
+const os = require('os');
 const { Server } = require('socket.io');
 const cors = require('cors');
 require('dotenv').config();
+
+/**
+ * Best guess IPv4 for "other devices on the same Wi‑Fi" share links.
+ * Picks Wi‑Fi/Ethernet (e.g. en0) over VPN/tunnels (utun, tun) so we don't
+ * encode http://10.x from a VPN that the phone isn't on.
+ */
+function scoreIface(name) {
+  const n = String(name).toLowerCase();
+  if (/^en\d+$/.test(n)) return 200;
+  if (n.startsWith('wlan') || n.startsWith('wifi')) return 190;
+  if (n.startsWith('eth')) return 180;
+  if (n.includes('utun') || n.includes('tun') || n.includes('tap')) return -150;
+  if (n.includes('bridge') || n.includes('docker') || n.includes('vbox') || n.includes('vmnet')) {
+    return -120;
+  }
+  if (n.startsWith('awdl')) return -80;
+  if (n.includes('ppp')) return -100;
+  return 0;
+}
+
+function scoreAddress(addr) {
+  const p = String(addr)
+    .split('.')
+    .map((x) => Number(x));
+  if (p.length !== 4 || p.some((x) => Number.isNaN(x) || x > 255)) return 0;
+  const [a, b] = p;
+  if (a === 169 && b === 254) return -400;
+  if (a === 192 && b === 168) return 100;
+  if (a === 172 && b >= 16 && b <= 31) return 80;
+  if (a === 10) return 40;
+  if (a === 100) return -80;
+  return 20;
+}
+
+function isValidIPv4(s) {
+  const p = String(s)
+    .split('.')
+    .map((x) => Number(x));
+  return p.length === 4 && p.every((x) => Number.isInteger(x) && x >= 0 && x <= 255);
+}
+
+function collectLanCandidates() {
+  const nets = os.networkInterfaces();
+  const out = [];
+  for (const iface of Object.keys(nets)) {
+    for (const net of nets[iface] || []) {
+      const fam = net.family;
+      const isV4 = fam === 'IPv4' || fam === 4;
+      if (isV4 && !net.internal && net.address) {
+        out.push({ address: net.address, iface });
+      }
+    }
+  }
+  return out;
+}
+
+function pickBestLanIPv4() {
+  const override = process.env.PUBLIC_LAN_IP && String(process.env.PUBLIC_LAN_IP).trim();
+  if (override && isValidIPv4(override)) {
+    return override;
+  }
+  const candidates = collectLanCandidates();
+  if (candidates.length === 0) return null;
+  candidates.sort((x, y) => {
+    const sx = scoreIface(x.iface) + scoreAddress(x.address);
+    const sy = scoreIface(y.iface) + scoreAddress(y.address);
+    return sy - sx;
+  });
+  return candidates[0].address;
+}
 
 // ---------------- APP SETUP ----------------
 const app = express();
@@ -232,6 +303,20 @@ async function searchTrack(query) {
 }
 
 // ---------------- REST ROUTES ----------------
+// Used by the Vite client when the page is opened at localhost so QR / copy
+// use http://<LAN-IP>:5173 instead (phones cannot reach laptop "localhost").
+app.get('/dev/lan', (req, res) => {
+  const candidates = collectLanCandidates()
+    .map((c) => ({
+      address: c.address,
+      iface: c.iface,
+      score: scoreIface(c.iface) + scoreAddress(c.address),
+    }))
+    .sort((a, b) => b.score - a.score);
+  const ipv4 = pickBestLanIPv4();
+  res.json({ ipv4, candidates });
+});
+
 app.get('/', (req, res) => {
   res.json({ message: 'Abyss Vibe DJ backend is alive', rooms: rooms.size });
 });
