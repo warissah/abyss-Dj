@@ -3,269 +3,443 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 require('dotenv').config();
-const mongoose = require('mongoose');
-
-
-
-// ---------------- MONGO ----------------
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.log('MongoDB error:', err));
 
 // ---------------- APP SETUP ----------------
 const app = express();
 const httpServer = http.createServer(app);
-const io = new Server(httpServer, {
-  cors: { origin: '*' }
-});
-
-
-// NOW define emitState (important!)
-function emitState() {
-  io.emit("update", {
-    queue,
-    currentTrack,
-    vibe: currentVibe
-  });
-}
-
+const io = new Server(httpServer, { cors: { origin: '*' } });
 
 app.use(cors());
 app.use(express.json());
 
-// ---------------- STATE ----------------
-let queue = [];
-let currentTrack = null;
-let currentVibe = "party";
-let trackStartTime = 0;
-let trackDuration = 180;
+// ---------------- IDENTITY POOLS ----------------
+// Temp-user name + avatar generators. Duplicated on the client (lib/names.js)
+// for any UI labels that need to render without waiting on the server.
+const ADJECTIVES = [
+  'Neon', 'Aqua', 'Coral', 'Abyss', 'Deep', 'Lunar', 'Tidal', 'Shimmer',
+  'Midnight', 'Velvet', 'Glow', 'Arctic', 'Pearl', 'Reef', 'Drift', 'Ghost',
+  'Echo', 'Prism', 'Nebula', 'Mist',
+];
+const NOUNS = [
+  'Jelly', 'Squid', 'Shark', 'Orca', 'Nautilus', 'Eel', 'Ray', 'Fish',
+  'Whale', 'Urchin', 'Crab', 'Seal', 'Otter', 'Kraken', 'Manta',
+];
+const AVATARS = ['🦑', '🐙', '🐠', '🪼', '🐡', '🦈', '🐋', '🐟', '🪸', '🐚', '🐬', '🦀', '🦞'];
 
-// ---------------- GROQ AI ----------------
-async function askAI(prompt) {
-  const response = await fetch(
-    'https://api.groq.com/openai/v1/chat/completions',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }]
-      })
-    }
-  );
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
-  const data = await response.json();
-  return data.choices[0].message.content;
-}
-
-// ---------------- SPOTIFY ----------------
-async function getSpotifyToken() {
-  const credentials = Buffer.from(
-    `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
-  ).toString('base64');
-
-  const response = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Basic ${credentials}`,
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    body: 'grant_type=client_credentials'
-  });
-
-  const data = await response.json();
-  return data.access_token;
-}
-
-async function searchSpotify(songName) {
-  const token = await getSpotifyToken();
-
-  const response = await fetch(
-    `https://api.spotify.com/v1/search?q=${encodeURIComponent(songName)}&type=track&limit=1`,
-    {
-      headers: { Authorization: `Bearer ${token}` }
-    }
-  );
-
-  const data = await response.json();
-
-  const track = data.tracks.items[0];
-
+function generateIdentity() {
   return {
-    name: track.name,
-    artist: track.artists[0].name,
-    uri: track.uri,
-    id: track.id
+    userId: `u_${Math.random().toString(36).slice(2, 10)}`,
+    name: pick(ADJECTIVES) + pick(NOUNS),
+    avatar: pick(AVATARS),
   };
 }
 
-// ---------------- ROUTES ----------------
-
-// Health
-app.get('/', (req, res) => {
-  res.json({ message: 'Abyss Vibe DJ backend is alive' });
-});
-
-// AI test
-app.get('/test-ai', async (req, res) => {
-  const response = await askAI('Say one hype DJ sentence.');
-  res.json({ response });
-});
-
-// Spotify test
-app.get('/test-spotify', async (req, res) => {
-  const track = await searchSpotify('Uptown Funk Bruno Mars');
-  res.json(track);
-});
-
-// ---------------- QUEUE SYSTEM ----------------
-
-// Add song (AI auto vibe tagging)
-app.post('/queue/add', async (req, res) => {
-  const { song, artist, uri } = req.body;
-
-  if (!song) {
-    return res.status(400).json({ error: "Song required" });
+function generateRoomCode() {
+  // Skip ambiguous chars (0/O, 1/I) so codes are easy to type.
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
+  return code;
+}
 
+// ---------------- ROOM STATE (in-memory) ----------------
+// rooms: Map<roomCode, RoomState>
+// All state lives in process memory; a server restart wipes everything. This
+// is intentional -- the app is single-process and session-scoped.
+const rooms = new Map();
+
+// iTunes previews are 30 seconds. Source of truth for playback timing.
+const TRACK_DURATION_MS = 30_000;
+
+function createRoom() {
+  let code;
+  do { code = generateRoomCode(); } while (rooms.has(code));
+  const room = {
+    code,
+    hostUserId: null,
+    members: new Map(), // userId -> { userId, name, avatar, socketId, joinedAt }
+    queue: [],
+    currentTrack: null,
+    trackStartedAt: 0,
+    trackDurationMs: TRACK_DURATION_MS,
+    vibe: 'party',
+    emptySince: Date.now(),
+  };
+  rooms.set(code, room);
+  return room;
+}
+
+function roomSnapshot(room) {
+  return {
+    code: room.code,
+    hostUserId: room.hostUserId,
+    members: Array.from(room.members.values()).map((m) => ({
+      userId: m.userId,
+      name: m.name,
+      avatar: m.avatar,
+      joinedAt: m.joinedAt,
+    })),
+    queue: room.queue,
+    currentTrack: room.currentTrack,
+    trackStartedAt: room.trackStartedAt,
+    trackDurationMs: room.trackDurationMs,
+    vibe: room.vibe,
+  };
+}
+
+function emitNowPlaying(room) {
+  io.to(room.code).emit('now_playing', {
+    currentTrack: room.currentTrack,
+    trackStartedAt: room.trackStartedAt,
+    trackDurationMs: room.trackDurationMs,
+  });
+}
+
+function emitQueueUpdated(room) {
+  io.to(room.code).emit('queue_updated', { queue: room.queue });
+}
+
+// ---------------- HTTP HELPERS ----------------
+// Parses an HTTP response as JSON but includes the raw body in thrown errors
+// so we can see captive-portal / proxy HTML pages instead of getting a
+// useless `SyntaxError: Unexpected token 'A', "Active pre"...` in logs.
+async function parseJsonOrThrow(response, label) {
+  const raw = await response.text();
   try {
-    const vibeResponse = await askAI(`
-Classify this song into ONE word vibe:
+    return JSON.parse(raw);
+  } catch {
+    const preview = raw.slice(0, 200).replace(/\s+/g, ' ');
+    throw new Error(
+      `${label} returned non-JSON (status ${response.status}). ` +
+        `Body starts with: "${preview}". ` +
+        `If this looks like an HTML/captive-portal page, your network is ` +
+        `intercepting the request.`
+    );
+  }
+}
 
-Song: ${song}
-Artist: ${artist}
+// ---------------- GEMINI AI ----------------
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 
-Choose ONE:
-hype, chill, party, pop, trap, edm, rock, rnb, sad
+async function askAI(prompt) {
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is not set in .env');
+  }
 
-Return ONLY one word.
-`);
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.8, maxOutputTokens: 128 },
+      }),
+    }
+  );
 
-    const vibe = vibeResponse.split('\n')[0].trim().toLowerCase();
+  const data = await parseJsonOrThrow(response, 'Gemini');
+  if (!response.ok) {
+    throw new Error(`Gemini error ${response.status}: ${JSON.stringify(data)}`);
+  }
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+}
 
-    const item = {
-      song,
-      artist,
-      uri,
-      vibe,
-      addedAt: Date.now()
-    };
+// ---------------- TRACK SEARCH (iTunes) ----------------
+// We use Apple's iTunes Search API because it:
+//   - Requires zero auth (no client id/secret, no Premium account)
+//   - Returns a 30-second previewUrl for ~every track in the catalog
+//   - Is rate-limited loosely enough for hackathon-scale traffic
+//
+// Returned shape: { id, name, artist, uri, preview_url, albumArt } so the
+// rest of the app (AudioPlayer, Room.jsx) doesn't have to change.
+async function searchTrack(query) {
+  const url =
+    `https://itunes.apple.com/search?media=music&entity=song&limit=5&term=` +
+    encodeURIComponent(query);
 
-    queue.push(item);
-    emitState();
+  const response = await fetch(url);
+  const data = await parseJsonOrThrow(response, 'iTunes search');
+  if (!response.ok) {
+    throw new Error(
+      `iTunes search error ${response.status}: ${JSON.stringify(data).slice(0, 200)}`
+    );
+  }
 
-    res.json({ message: "Added to queue", item, queue });
+  const items = Array.isArray(data.results) ? data.results : [];
+  if (items.length === 0) return null;
 
+  // Prefer the first result with a real preview; fall back to the top hit.
+  const picked = items.find((t) => t.previewUrl) || items[0];
+
+  // Upgrade artwork from 100x100 to 600x600 (iTunes serves the same URL at
+  // whatever size you ask for, just by string-replacing the filename).
+  const art = picked.artworkUrl100
+    ? picked.artworkUrl100.replace('100x100', '600x600')
+    : null;
+
+  return {
+    id: String(picked.trackId ?? `${picked.collectionId}-${picked.trackNumber}`),
+    name: picked.trackName ?? 'Unknown',
+    artist: picked.artistName ?? 'Unknown',
+    uri: picked.trackViewUrl ?? '',
+    preview_url: picked.previewUrl || null,
+    albumArt: art,
+  };
+}
+
+// ---------------- REST ROUTES ----------------
+app.get('/', (req, res) => {
+  res.json({ message: 'Abyss Vibe DJ backend is alive', rooms: rooms.size });
+});
+
+// Host flow: create a new room, return its code. First socket to join_room
+// on this code becomes the host.
+app.post('/rooms', (req, res) => {
+  const room = createRoom();
+  console.log(`Room created: ${room.code}`);
+  res.json({ roomCode: room.code });
+});
+
+// Guest flow: validate a shared link before showing the room UI.
+app.get('/rooms/:code', (req, res) => {
+  const code = String(req.params.code || '').toUpperCase();
+  const room = rooms.get(code);
+  if (!room) return res.json({ exists: false });
+  res.json({ exists: true, memberCount: room.members.size });
+});
+
+app.get('/test-ai', async (req, res) => {
+  try {
+    const response = await askAI('Say one hype DJ sentence.');
+    res.json({ response });
   } catch (err) {
-    res.status(500).json({ error: "Vibe classification failed" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Get queue
-app.get('/queue', (req, res) => {
-  res.json({ queue });
+app.get('/test-search', async (req, res) => {
+  try {
+    const track = await searchTrack('Uptown Funk Bruno Mars');
+    res.json(track);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---------------- DJ LOGIC ----------------
-
-function getDominantVibe() {
-  if (queue.length === 0) return "party";
-
+function getDominantVibe(queue) {
+  if (queue.length === 0) return 'party';
   const counts = {};
-
   for (const item of queue) {
+    if (!item.vibe) continue;
     counts[item.vibe] = (counts[item.vibe] || 0) + 1;
   }
-
-  return Object.entries(counts)
-    .sort((a, b) => b[1] - a[1])[0][0];
+  const entries = Object.entries(counts);
+  if (entries.length === 0) return 'party';
+  return entries.sort((a, b) => b[1] - a[1])[0][0];
 }
 
-function playNextSong() {
-  if (queue.length === 0) return null;
+function advanceTrack(room) {
+  const next = room.queue.shift() || null;
+  room.currentTrack = next;
+  room.trackStartedAt = next ? Date.now() : 0;
+  room.vibe = getDominantVibe(room.queue);
 
-  const next = queue.shift();
+  emitQueueUpdated(room);
+  emitNowPlaying(room);
+  io.to(room.code).emit('room_update', { vibe: room.vibe });
 
-  currentTrack = next;
-  trackStartTime = Date.now();
-  trackDuration = 180;
+  if (next) {
+    console.log(`[${room.code}] Now playing: ${next.name} - ${next.artist}`);
+  } else {
+    console.log(`[${room.code}] Queue drained, playback stopped.`);
+  }
+}
 
-  return next;
+// Tag a freshly-added track's vibe with Gemini in the background so adding
+// a song stays snappy. When it resolves we re-emit the queue and vibe.
+function tagVibeAsync(room, track) {
+  askAI(`
+Classify this song into ONE word vibe.
+Song: ${track.name}
+Artist: ${track.artist}
+Choose ONE: hype, chill, party, pop, trap, edm, rock, rnb, sad.
+Return ONLY one word.
+`)
+    .then((text) => {
+      const vibe = (text || '').split('\n')[0].trim().toLowerCase();
+      track.vibe = vibe;
+      room.vibe = getDominantVibe(room.queue);
+      emitQueueUpdated(room);
+      io.to(room.code).emit('room_update', { vibe: room.vibe });
+    })
+    .catch((err) => console.warn(`[${room.code}] vibe tag failed:`, err.message));
 }
 
 // ---------------- AUTO DJ LOOP ----------------
+// One global 1-second tick that walks every active room. Fine at hackathon
+// scale (tens of rooms); not production-grade.
+setInterval(() => {
+  const now = Date.now();
+  for (const room of rooms.values()) {
+    if (room.members.size === 0) continue;
 
-setInterval(async () => {
-  try {
-    const now = Date.now();
+    const hasTrack = !!room.currentTrack;
+    const elapsed = hasTrack && now - room.trackStartedAt >= room.trackDurationMs - 200;
 
-    const songEnded =
-      !currentTrack ||
-      (now - trackStartTime) / 1000 >= trackDuration - 5;
-
-    if (!songEnded) return;
-
-    const dominantVibe = getDominantVibe();
-    currentVibe = dominantVibe;
-
-    console.log("🎧 Dominant vibe:", dominantVibe);
-
-    const aiResponse = await askAI(`
-You are an AI DJ.
-
-Current vibe: ${dominantVibe}
-
-Suggest ONE song.
-Return ONLY:
-Song Name - Artist Name
-
-emitState();
-
-`);
-
-    const cleaned = aiResponse.split('\n')[0].trim();
-
-    const track = await searchSpotify(cleaned);
-
-    currentTrack = track;
-    trackStartTime = Date.now();
-
-    emitState();
-
-    console.log("▶️ Now playing:", track.name, "-", track.artist);
-
-  } catch (err) {
-    console.error("DJ loop error:", err.message);
+    if (!hasTrack && room.queue.length > 0) {
+      advanceTrack(room);
+    } else if (elapsed) {
+      advanceTrack(room);
+    }
   }
-}, 5000);
+}, 1000);
+
+// GC: drop empty rooms after 5 minutes so long-running dev servers don't leak.
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, room] of rooms.entries()) {
+    if (room.members.size === 0 && room.emptySince && now - room.emptySince > 5 * 60 * 1000) {
+      rooms.delete(code);
+      console.log(`Room ${code} garbage-collected.`);
+    }
+  }
+}, 60 * 1000);
 
 // ---------------- SOCKET.IO ----------------
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+  console.log('Socket connected:', socket.id);
 
+  socket.on('join_room', ({ roomCode } = {}) => {
+    try {
+      const code = String(roomCode || '').toUpperCase();
+      const room = rooms.get(code);
+      if (!room) {
+        socket.emit('join_error', { error: 'Room not found' });
+        return;
+      }
 
+      const identity = generateIdentity();
+      const member = {
+        ...identity,
+        socketId: socket.id,
+        joinedAt: Date.now(),
+      };
+      room.members.set(identity.userId, member);
+      room.emptySince = null;
 
-  socket.on('join_room', (roomCode) => {
-    socket.join(roomCode);
+      if (!room.hostUserId) room.hostUserId = identity.userId;
 
-    const userId = `user_${Math.floor(Math.random() * 9999)}`;
+      socket.join(code);
+      socket.data.userId = identity.userId;
+      socket.data.roomCode = code;
 
-    socket.emit('joined', { roomCode, userId });
+      socket.emit('joined', {
+        userId: identity.userId,
+        name: identity.name,
+        avatar: identity.avatar,
+        isHost: room.hostUserId === identity.userId,
+      });
 
-    console.log(`${userId} joined room ${roomCode}`);
+      socket.emit('room_state', roomSnapshot(room));
+
+      socket.to(code).emit('user_joined', {
+        userId: identity.userId,
+        name: identity.name,
+        avatar: identity.avatar,
+      });
+
+      console.log(`[${code}] ${identity.name} joined (${room.members.size} members)`);
+    } catch (err) {
+      console.error('join_room error:', err);
+      socket.emit('join_error', { error: err.message });
+    }
+  });
+
+  socket.on('add_song', async ({ query } = {}) => {
+    const code = socket.data.roomCode;
+    const userId = socket.data.userId;
+    if (!code || !userId) {
+      socket.emit('add_song_error', { error: 'Not in a room' });
+      return;
+    }
+    const room = rooms.get(code);
+    if (!room) {
+      socket.emit('add_song_error', { error: 'Room gone' });
+      return;
+    }
+    if (!query || !String(query).trim()) {
+      socket.emit('add_song_error', { error: 'Empty query' });
+      return;
+    }
+
+    try {
+      const track = await searchTrack(String(query).trim());
+      if (!track) {
+        socket.emit('add_song_error', { error: 'No results' });
+        return;
+      }
+      track.addedBy = userId;
+      room.queue.push(track);
+
+      // Promote immediately when nothing is playing so the first add starts
+      // audio instantly instead of waiting for the 1s DJ tick.
+      if (!room.currentTrack) {
+        advanceTrack(room);
+      } else {
+        emitQueueUpdated(room);
+      }
+
+      tagVibeAsync(room, track);
+    } catch (err) {
+      console.error('add_song error:', err);
+      socket.emit('add_song_error', { error: err.message });
+    }
   });
 
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+    const { userId, roomCode } = socket.data || {};
+    if (!userId || !roomCode) {
+      console.log('Socket disconnected (no room):', socket.id);
+      return;
+    }
+
+    const room = rooms.get(roomCode);
+    if (!room) return;
+
+    const member = room.members.get(userId);
+    room.members.delete(userId);
+
+    io.to(roomCode).emit('user_left', {
+      userId,
+      name: member?.name,
+      avatar: member?.avatar,
+    });
+
+    // Naive host handoff: next member in insertion order becomes host.
+    if (room.hostUserId === userId) {
+      const next = room.members.values().next().value;
+      room.hostUserId = next?.userId ?? null;
+      io.to(roomCode).emit('room_update', { hostUserId: room.hostUserId });
+    }
+
+    if (room.members.size === 0) {
+      room.emptySince = Date.now();
+    }
+
+    console.log(
+      `[${roomCode}] ${member?.name ?? userId} left (${room.members.size} members)`
+    );
   });
 });
 
 // ---------------- START SERVER ----------------
 const PORT = process.env.PORT || 3000;
-
 httpServer.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
