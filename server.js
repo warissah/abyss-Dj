@@ -125,9 +125,21 @@ async function parseJsonOrThrow(response, label) {
 // ---------------- GEMINI AI ----------------
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 
-async function askAI(prompt) {
+// `options.json = true` switches Gemini into JSON-only response mode, which
+// is essential for the dj_request handler because it parses the reply as
+// strict JSON. `maxOutputTokens` defaults to 256 so structured responses
+// (reply + 1-3 queries) don't get truncated mid-string.
+async function askAI(prompt, options = {}) {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY is not set in .env');
+  }
+
+  const generationConfig = {
+    temperature: options.temperature ?? 0.8,
+    maxOutputTokens: options.maxOutputTokens ?? 256,
+  };
+  if (options.json) {
+    generationConfig.responseMimeType = 'application/json';
   }
 
   const response = await fetch(
@@ -137,7 +149,7 @@ async function askAI(prompt) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.8, maxOutputTokens: 128 },
+        generationConfig,
       }),
     }
   );
@@ -399,6 +411,114 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('add_song error:', err);
       socket.emit('add_song_error', { error: err.message });
+    }
+  });
+
+  // Natural-language DJ request: ChatBar routes prompts like "play something
+  // chill" here via intent.js. We ask Gemini to return strict JSON with a
+  // short DJ reply + 1-3 track search strings, then run each through iTunes
+  // and push the results into the queue. The reply goes to the requesting
+  // socket only; queue_updated goes to the whole room.
+  socket.on('dj_request', async ({ prompt, context } = {}) => {
+    const code = socket.data.roomCode;
+    const userId = socket.data.userId;
+    if (!code || !userId) {
+      socket.emit('dj_response', { reply: "You're not in a room." });
+      return;
+    }
+    const room = rooms.get(code);
+    if (!room) {
+      socket.emit('dj_response', { reply: 'Room is gone.' });
+      return;
+    }
+    if (!prompt || !String(prompt).trim()) {
+      socket.emit('dj_response', { reply: 'Tell me the vibe you want.' });
+      return;
+    }
+
+    try {
+      const ctx = context || {};
+      const currentLine = ctx.currentTrack
+        ? `${ctx.currentTrack.name} by ${ctx.currentTrack.artist}`
+        : 'nothing playing';
+
+      const aiRaw = await askAI(
+        `
+You are the DJ for an online listening room.
+Current track: ${currentLine}.
+Current vibe: ${ctx.vibe || 'unknown'}.
+User just said: "${String(prompt).trim()}"
+
+Respond with STRICT JSON only:
+{
+  "reply": "<one short DJ sentence, under 15 words>",
+  "queries": ["<search string 1>", "<search string 2>", "<search string 3>"]
+}
+
+The queries must be real, well-known songs that match what the user asked.
+Format each query as "<song title> <artist>" so it's easy to find.
+Return 1-3 queries.
+`,
+        { json: true, maxOutputTokens: 256, temperature: 0.9 }
+      );
+
+      let parsed;
+      try {
+        const cleaned = aiRaw
+          .trim()
+          .replace(/^```json\s*/i, '')
+          .replace(/^```\s*/i, '')
+          .replace(/```\s*$/i, '');
+        parsed = JSON.parse(cleaned);
+      } catch {
+        socket.emit('dj_response', {
+          reply: 'The DJ mumbled something unreadable. Try again?',
+        });
+        return;
+      }
+
+      const reply = (parsed.reply || 'Spinning something up').toString().slice(0, 140);
+      const queries = Array.isArray(parsed.queries)
+        ? parsed.queries
+            .filter((q) => typeof q === 'string' && q.trim())
+            .slice(0, 3)
+        : [];
+
+      socket.emit('dj_response', { reply });
+
+      if (queries.length === 0) return;
+
+      const added = [];
+      for (const q of queries) {
+        try {
+          const track = await searchTrack(q);
+          if (!track) continue;
+          track.addedBy = userId;
+          room.queue.push(track);
+          added.push(track);
+        } catch (err) {
+          console.warn(`[${code}] dj_request search failed for "${q}":`, err.message);
+        }
+      }
+
+      if (added.length === 0) return;
+
+      if (!room.currentTrack) {
+        advanceTrack(room);
+      } else {
+        emitQueueUpdated(room);
+      }
+
+      for (const t of added) tagVibeAsync(room, t);
+
+      console.log(
+        `[${code}] DJ added ${added.length} track(s) from prompt: "${prompt}"`
+      );
+    } catch (err) {
+      console.error('dj_request error:', err);
+      socket.emit('dj_response', {
+        reply: `DJ booth short-circuited: ${err.message}`,
+      });
     }
   });
 
