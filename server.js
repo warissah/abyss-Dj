@@ -68,6 +68,7 @@ function createRoom() {
     trackDurationMs: TRACK_DURATION_MS,
     vibe: 'party',
     emptySince: Date.now(),
+    advancing: false,
   };
   rooms.set(code, room);
   return room;
@@ -256,20 +257,93 @@ function getDominantVibe(queue) {
   return entries.sort((a, b) => b[1] - a[1])[0][0];
 }
 
-function advanceTrack(room) {
-  const next = room.queue.shift() || null;
-  room.currentTrack = next;
-  room.trackStartedAt = next ? Date.now() : 0;
-  room.vibe = getDominantVibe(room.queue);
+// Ask Gemini which queue item should play next based on the current track
+// and the vibe mix of the queue. Returns an integer index into `queue` (or
+// 0 on any failure). Kept dead-simple: one prompt, one integer out. We never
+// let the AI invent tracks -- it can only pick from what users added.
+async function pickNextTrackIndex(room) {
+  if (room.queue.length <= 1) return 0;
 
-  emitQueueUpdated(room);
-  emitNowPlaying(room);
-  io.to(room.code).emit('room_update', { vibe: room.vibe });
+  const current = room.currentTrack
+    ? `${room.currentTrack.name} by ${room.currentTrack.artist}` +
+      (room.currentTrack.vibe ? ` (vibe: ${room.currentTrack.vibe})` : '')
+    : 'nothing';
 
-  if (next) {
-    console.log(`[${room.code}] Now playing: ${next.name} - ${next.artist}`);
-  } else {
-    console.log(`[${room.code}] Queue drained, playback stopped.`);
+  const list = room.queue
+    .map((t, i) => {
+      const vibe = t.vibe ? ` [${t.vibe}]` : '';
+      return `${i}. ${t.name} - ${t.artist}${vibe}`;
+    })
+    .join('\n');
+
+  try {
+    const raw = await askAI(
+      `
+You are the DJ for a shared listening room. Pick which track should play NEXT.
+
+Just finished / currently playing: ${current}
+Room vibe so far: ${room.vibe || 'unknown'}
+
+Queue (users added these -- you may only pick FROM this list):
+${list}
+
+Pick the ONE index whose genre/energy best continues the vibe without
+jarring the listeners. Prefer smooth transitions over hard cuts.
+
+Respond with STRICT JSON only:
+{"index": <integer>}
+`,
+      { json: true, maxOutputTokens: 32, temperature: 0.4 }
+    );
+
+    const cleaned = String(raw || '')
+      .trim()
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/```\s*$/i, '');
+    const parsed = JSON.parse(cleaned);
+    const idx = Number(parsed.index);
+    if (Number.isInteger(idx) && idx >= 0 && idx < room.queue.length) {
+      return idx;
+    }
+  } catch (err) {
+    console.warn(`[${room.code}] AI picker fell back to FIFO:`, err.message);
+  }
+  return 0;
+}
+
+// Async because it may await the AI picker. `room.advancing` guards against
+// the 1s auto-DJ tick re-entering while we're mid-pick.
+async function advanceTrack(room) {
+  if (room.advancing) return;
+  room.advancing = true;
+  try {
+    let next = null;
+    if (room.queue.length > 0) {
+      const idx = await pickNextTrackIndex(room);
+      [next] = room.queue.splice(idx, 1);
+      if (idx !== 0) {
+        console.log(
+          `[${room.code}] AI picked queue[${idx}] over FIFO: ${next.name}`
+        );
+      }
+    }
+
+    room.currentTrack = next;
+    room.trackStartedAt = next ? Date.now() : 0;
+    room.vibe = getDominantVibe(room.queue);
+
+    emitQueueUpdated(room);
+    emitNowPlaying(room);
+    io.to(room.code).emit('room_update', { vibe: room.vibe });
+
+    if (next) {
+      console.log(`[${room.code}] Now playing: ${next.name} - ${next.artist}`);
+    } else {
+      console.log(`[${room.code}] Queue drained, playback stopped.`);
+    }
+  } finally {
+    room.advancing = false;
   }
 }
 
@@ -300,14 +374,19 @@ setInterval(() => {
   const now = Date.now();
   for (const room of rooms.values()) {
     if (room.members.size === 0) continue;
+    if (room.advancing) continue;
 
     const hasTrack = !!room.currentTrack;
     const elapsed = hasTrack && now - room.trackStartedAt >= room.trackDurationMs - 200;
 
     if (!hasTrack && room.queue.length > 0) {
-      advanceTrack(room);
+      advanceTrack(room).catch((err) =>
+        console.error(`[${room.code}] advance error:`, err)
+      );
     } else if (elapsed) {
-      advanceTrack(room);
+      advanceTrack(room).catch((err) =>
+        console.error(`[${room.code}] advance error:`, err)
+      );
     }
   }
 }, 1000);
@@ -402,7 +481,9 @@ io.on('connection', (socket) => {
       // Promote immediately when nothing is playing so the first add starts
       // audio instantly instead of waiting for the 1s DJ tick.
       if (!room.currentTrack) {
-        advanceTrack(room);
+        advanceTrack(room).catch((err) =>
+          console.error(`[${code}] advance error:`, err)
+        );
       } else {
         emitQueueUpdated(room);
       }
@@ -429,6 +510,14 @@ io.on('connection', (socket) => {
     const room = rooms.get(code);
     if (!room) {
       socket.emit('dj_response', { reply: 'Room is gone.' });
+      return;
+    }
+    // Only the host can steer the DJ with prompts. Guests can add songs
+    // (which the AI reorders on track end) but cannot chat-drive the DJ.
+    if (room.hostUserId !== userId) {
+      socket.emit('dj_response', {
+        reply: 'Only the host can chat with the DJ.',
+      });
       return;
     }
     if (!prompt || !String(prompt).trim()) {
@@ -504,7 +593,9 @@ Return 1-3 queries.
       if (added.length === 0) return;
 
       if (!room.currentTrack) {
-        advanceTrack(room);
+        advanceTrack(room).catch((err) =>
+          console.error(`[${code}] advance error:`, err)
+        );
       } else {
         emitQueueUpdated(room);
       }
