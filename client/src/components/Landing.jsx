@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { BACKEND_URL } from "../socket.js";
 import { previewIdentity } from "../lib/identity.js";
+import { goToRoom, goToUserEnd } from "../lib/router.js";
 
 export default function Landing() {
   const [code, setCode] = useState("");
@@ -8,14 +9,6 @@ export default function Landing() {
   const [error, setError] = useState("");
 
   const preview = useMemo(() => previewIdentity(), []);
-
-  const goToRoom = (roomCode) => {
-    const normalized = String(roomCode).trim().toUpperCase();
-    if (!normalized) return;
-    // Keep it in ?room=CODE so a copy/paste of the URL drops the next user
-    // directly into the room.
-    window.location.href = `${window.location.pathname}?room=${normalized}`;
-  };
 
   const createRoom = async () => {
     setBusy(true);
@@ -76,6 +69,10 @@ export default function Landing() {
             disabled={busy}
           >
             {busy ? "Summoning..." : "Create room"}
+          </button>
+
+          <button className="secondaryBtn" onClick={goToUserEnd} disabled={busy}>
+            Open user end page
           </button>
 
           <div className="landingDivider">or</div>

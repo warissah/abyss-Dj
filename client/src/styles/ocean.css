@@ -398,6 +398,60 @@
   max-width: 360px;
 }
 
+/* =========================
+   USER END PAGE
+========================= */
+.userEnd {
+  position: relative;
+  z-index: 10;
+  min-height: 100vh;
+  width: 100vw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.userEndCard {
+  width: min(720px, 100%);
+  border-radius: 22px;
+  border: 1px solid rgba(0, 255, 255, 0.35);
+  background: rgba(0, 10, 30, 0.55);
+  backdrop-filter: blur(10px);
+  padding: 28px;
+  box-shadow: 0 0 28px rgba(0, 255, 255, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  align-items: center;
+}
+
+.userEndSection {
+  width: 100%;
+}
+
+.userEndHeading {
+  color: cyan;
+  font-size: 18px;
+  margin-bottom: 10px;
+}
+
+.userEndList {
+  margin: 0;
+  padding-left: 18px;
+  color: rgba(255, 255, 255, 0.88);
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.userEndList code {
+  background: rgba(0, 255, 255, 0.12);
+  border: 1px solid rgba(0, 255, 255, 0.25);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
 .primaryBtn,
 .secondaryBtn {
   font-size: 16px;

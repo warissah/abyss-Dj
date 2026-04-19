@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { socket } from "../socket.js";
 import { saveIdentity } from "../lib/identity.js";
+import { goToLanding } from "../lib/router.js";
 import AudioPlayer from "./AudioPlayer.jsx";
 import Toasts from "./Toasts.jsx";
 import ChatBar from "./ChatBar.jsx";
@@ -226,7 +227,7 @@ export default function Room({ code }) {
             <p className="landingSubtitle">{error}</p>
             <button
               className="primaryBtn"
-              onClick={() => (window.location.href = window.location.pathname)}
+              onClick={goToLanding}
             >
               Back home
             </button>

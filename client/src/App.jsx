@@ -1,25 +1,26 @@
 import { useEffect, useState } from "react";
-import Landing from "./components/Landing.jsx";
-import Room from "./components/Room.jsx";
+import LandingPage from "./pages/LandingPage.jsx";
+import RoomPage from "./pages/RoomPage.jsx";
+import UserEndPage from "./pages/UserEndPage.jsx";
+import { getNavigationEventName, readRouteFromUrl } from "./lib/router.js";
 import "./styles/ocean.css";
 
-// Thin URL-based router. ?room=CODE renders a Room, everything else lands.
-// No react-router dep: Tier 1 only needs two "pages".
-function readRoomFromUrl() {
-  const params = new URLSearchParams(window.location.search);
-  const raw = params.get("room");
-  return raw ? raw.trim().toUpperCase() : null;
-}
-
 export default function App() {
-  const [roomCode, setRoomCode] = useState(readRoomFromUrl);
+  const [route, setRoute] = useState(readRouteFromUrl);
 
   useEffect(() => {
-    const onPop = () => setRoomCode(readRoomFromUrl());
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+    const onRouteChange = () => setRoute(readRouteFromUrl());
+    const navigationEvent = getNavigationEventName();
+
+    window.addEventListener("popstate", onRouteChange);
+    window.addEventListener(navigationEvent, onRouteChange);
+    return () => {
+      window.removeEventListener("popstate", onRouteChange);
+      window.removeEventListener(navigationEvent, onRouteChange);
+    };
   }, []);
 
-  if (!roomCode) return <Landing />;
-  return <Room code={roomCode} />;
+  if (route.name === "room") return <RoomPage roomCode={route.roomCode} />;
+  if (route.name === "user-end") return <UserEndPage />;
+  return <LandingPage />;
 }
