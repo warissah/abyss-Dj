@@ -18,9 +18,12 @@ export default function AiDjChatter({ vibe }) {
   // Local rotation.
   useEffect(() => {
     // Instant switch when vibe changes so it feels reactive.
+    let t0 = null;
     if (Date.now() >= serverUntil) {
-      setText(pickMessage(vibe));
-      setFadeKey((k) => k + 1);
+      t0 = setTimeout(() => {
+        setText(pickMessage(vibe));
+        setFadeKey((k) => k + 1);
+      }, 0);
     }
 
     const tick = () => {
@@ -30,7 +33,10 @@ export default function AiDjChatter({ vibe }) {
     };
 
     const id = setInterval(tick, ROTATE_MS);
-    return () => clearInterval(id);
+    return () => {
+      clearInterval(id);
+      if (t0) clearTimeout(t0);
+    };
   }, [vibe, serverUntil]);
 
   // Server-driven override.

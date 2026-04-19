@@ -767,6 +767,8 @@ Return 1-3 queries.
 
 // ---------------- START SERVER ----------------
 const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+// Bind all interfaces so phones on the LAN can reach Socket.IO / REST when the
+// UI is opened via http://<lan-ip>:5173 (QR join flow).
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on http://0.0.0.0:${PORT} (LAN: use this machine's IP + :${PORT})`);
 });

@@ -40,6 +40,10 @@ export default function GuestView({ code, me, state, bubbles, error }) {
   };
 
   const np = state.currentTrack;
+  const myId = me?.userId;
+  const playingIsMine = !!(np && myId && np.addedBy === myId);
+  const nextUp = state.queue?.[0];
+  const nextIsMine = !!(nextUp && myId && nextUp.addedBy === myId);
 
   return (
     <div className="ocean">
@@ -88,12 +92,32 @@ export default function GuestView({ code, me, state, bubbles, error }) {
             {!np?.albumArt && <span className="guestNowArtEmoji">🎧</span>}
           </div>
           <div className="guestNowText">
-            <span className="guestNowLabel">NOW PLAYING</span>
-            <h2 className="guestNowTitle">{np?.name || "Waiting for music..."}</h2>
+            <span className="guestNowLabel">{np ? "NOW PLAYING" : "GETTING READY"}</span>
+            <h2 className="guestNowTitle">
+              {np?.name || "Warming up the speakers..."}
+            </h2>
             <p className="guestNowArtist">
               {np?.artist || "Your host will start soon"}
             </p>
+            {!np && (
+              <div className="guestEq" aria-label="Equalizer animation">
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+              </div>
+            )}
             {np?.vibe && <span className="guestNowVibe">vibe: {np.vibe}</span>}
+            {!np && state.vibe && state.vibe !== "loading" && (
+              <span className="guestNowVibe">vibe: {state.vibe}</span>
+            )}
+            {playingIsMine && (
+              <span className="guestHintChip">🎧 Your song is playing now</span>
+            )}
+            {!playingIsMine && nextIsMine && (
+              <span className="guestHintChip">🎯 Your pick is next</span>
+            )}
           </div>
         </div>
 

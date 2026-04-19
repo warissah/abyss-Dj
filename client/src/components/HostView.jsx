@@ -5,6 +5,8 @@ import LikeButton from "./LikeButton.jsx";
 import SkipVote from "./SkipVote.jsx";
 import AiDjChatter from "./AiDjChatter.jsx";
 import VibeOrb from "./VibeOrb.jsx";
+import { QRCodeSVG } from "qrcode.react";
+import { useMemo, useState } from "react";
 
 // Full host dashboard: now-playing disc, queue, vibe orb, DJ chat bar, audio.
 // This is the original Room layout, now rendered only when me.isHost === true.
@@ -21,6 +23,11 @@ export default function HostView({
   contextSnapshot,
   error,
 }) {
+  const [shareOpen, setShareOpen] = useState(false);
+  const joinUrl = useMemo(() => {
+    return `${window.location.origin}${window.location.pathname}?room=${code}`;
+  }, [code]);
+
   return (
     <div className="ocean">
       <VibeOrb vibe={state.vibe} energy={energy} />
@@ -54,9 +61,57 @@ export default function HostView({
         </div>
       </div>
 
-      <button className="sharePill" onClick={copyLink}>
+      <button
+        className="sharePill"
+        onClick={() => setShareOpen((v) => !v)}
+        aria-haspopup="dialog"
+        aria-expanded={shareOpen}
+      >
         {copied ? "Link copied!" : `Share ${code}`}
       </button>
+
+      {shareOpen && (
+        <>
+          <button
+            type="button"
+            className="sharePopoverBackdrop"
+            onClick={() => setShareOpen(false)}
+            aria-label="Close share"
+          />
+          <div className="sharePopover" role="dialog" aria-label="Share room">
+            <div className="sharePopoverCard">
+              <div className="sharePopoverTitle">Scan to join Room {code}</div>
+              <div className="sharePopoverQr">
+                <QRCodeSVG
+                  value={joinUrl}
+                  size={220}
+                  level="M"
+                  includeMargin
+                />
+              </div>
+              <div className="sharePopoverUrl" title={joinUrl}>
+                {joinUrl}
+              </div>
+              <div className="sharePopoverActions">
+                <button
+                  type="button"
+                  className="sharePopoverCopyBtn"
+                  onClick={copyLink}
+                >
+                  Copy link
+                </button>
+                <button
+                  type="button"
+                  className="sharePopoverCloseBtn"
+                  onClick={() => setShareOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       <div className="center">
         <div className="nowPlayingStage">

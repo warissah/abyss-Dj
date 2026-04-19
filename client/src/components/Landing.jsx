@@ -8,6 +8,10 @@ export default function Landing() {
   const [error, setError] = useState("");
 
   const preview = useMemo(() => previewIdentity(), []);
+  const isMobile = useMemo(() => {
+    if (typeof navigator === "undefined") return false;
+    return /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent || "");
+  }, []);
 
   const goToRoom = (roomCode) => {
     const normalized = String(roomCode).trim().toUpperCase();
@@ -85,6 +89,9 @@ export default function Landing() {
               className="codeInput"
               placeholder="ROOM CODE"
               maxLength={6}
+              autoFocus
+              inputMode="text"
+              autoCapitalize="characters"
               value={code}
               onChange={(e) => setCode(e.target.value.toUpperCase())}
               onKeyDown={(e) => e.key === "Enter" && joinRoom()}
@@ -97,6 +104,10 @@ export default function Landing() {
               Join
             </button>
           </div>
+
+          {isMobile && (
+            <div className="landingHint">Scan QR from the host screen to join fast.</div>
+          )}
 
           {error && <div className="landingError">{error}</div>}
         </div>

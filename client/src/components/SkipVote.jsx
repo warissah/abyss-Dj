@@ -20,8 +20,11 @@ export default function SkipVote({
 
   // Any time the track changes, reset local vote (the server would too).
   useEffect(() => {
-    setLocalVoted(false);
-    setFlash(false);
+    const t = setTimeout(() => {
+      setLocalVoted(false);
+      setFlash(false);
+    }, 0);
+    return () => clearTimeout(t);
   }, [trackId]);
 
   const serverList = Array.isArray(skipVotes) ? skipVotes : null;
@@ -41,9 +44,12 @@ export default function SkipVote({
 
   useEffect(() => {
     if (votes >= threshold && votes > 0) {
-      setFlash(true);
-      const t = setTimeout(() => setFlash(false), 700);
-      return () => clearTimeout(t);
+      const t0 = setTimeout(() => setFlash(true), 0);
+      const t1 = setTimeout(() => setFlash(false), 700);
+      return () => {
+        clearTimeout(t0);
+        clearTimeout(t1);
+      };
     }
   }, [votes, threshold]);
 
