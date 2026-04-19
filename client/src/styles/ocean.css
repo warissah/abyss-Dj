@@ -927,6 +927,12 @@
 /* =========================
    SKIP VOTE BUTTON
 ========================= */
+.guestSkipRow {
+  display: flex;
+  justify-content: center;
+  margin: 14px 0 4px;
+}
+
 .skipBtn {
   display: inline-flex;
   align-items: center;

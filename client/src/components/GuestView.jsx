@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { socket } from "../socket.js";
 import OceanAmbience from "./OceanAmbience.jsx";
+import SkipVote from "./SkipVote.jsx";
 
 const ADD_CONFIRM_MS = 2500;
 const HEART_TAP_MIN_MS = 200;
@@ -173,6 +174,17 @@ export default function GuestView({ code, me, state, bubbles, error }) {
             )}
           </div>
         </div>
+
+        {np && (
+          <div className="guestSkipRow">
+            <SkipVote
+              trackId={np.id}
+              memberCount={state.members.length}
+              skipVotes={state.skipVotes}
+              myUserId={me?.userId}
+            />
+          </div>
+        )}
 
         <form className="guestAddForm" onSubmit={addSong}>
           <input

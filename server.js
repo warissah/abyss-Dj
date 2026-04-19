@@ -166,6 +166,8 @@ function createRoom() {
     // Ring buffer of recently-played tracks so the AI doesn't loop the
     // same 2 songs forever when auto-extending.
     recentTracks: [],
+    // userIds who voted to skip the current track (cleared on advance).
+    skipVotes: [],
   };
   rooms.set(code, room);
   return room;
@@ -186,15 +188,31 @@ function roomSnapshot(room) {
     trackStartedAt: room.trackStartedAt,
     trackDurationMs: room.trackDurationMs,
     vibe: room.vibe,
+    skipVotes: room.skipVotes || [],
   };
 }
 
 function emitNowPlaying(room) {
+  room.skipVotes = (room.skipVotes || []).filter((id) => room.members.has(id));
   io.to(room.code).emit('now_playing', {
     currentTrack: room.currentTrack,
     trackStartedAt: room.trackStartedAt,
     trackDurationMs: room.trackDurationMs,
+    skipVotes: room.skipVotes,
   });
+}
+
+/** When enough listeners vote skip, advance to the next track (demo-friendly). */
+function maybeAdvanceFromSkipVotes(room) {
+  if (!room.currentTrack || room.advancing) return;
+  const need = Math.max(1, Math.ceil(room.members.size / 2));
+  if ((room.skipVotes || []).length >= need) {
+    // FIFO next track — do not await Gemini here or skip fights with
+    // in-flight advanceTrack (room.advancing) and feels broken in demos.
+    advanceTrack(room, { fifoNext: true }).catch((err) =>
+      console.error(`[${room.code}] advance (skip vote) error:`, err)
+    );
+  }
 }
 
 function emitQueueUpdated(room) {
@@ -565,10 +583,14 @@ Respond with STRICT JSON only:
 
 // Async because it may await the AI picker. `room.advancing` guards against
 // the 1s auto-DJ tick re-entering while we're mid-pick.
-async function advanceTrack(room) {
+// `fifoNext: true` — take queue[0] (used for community skip; no Gemini wait).
+async function advanceTrack(room, opts = {}) {
+  const fifoNext = !!opts.fifoNext;
   if (room.advancing) return;
   room.advancing = true;
   try {
+    room.skipVotes = [];
+
     // Push the outgoing track onto the recents ring buffer so the
     // auto-continuation prompt can avoid repeating it.
     if (room.currentTrack) {
@@ -584,9 +606,12 @@ async function advanceTrack(room) {
 
     let next = null;
     if (room.queue.length > 0) {
-      const idx = await pickNextTrackIndex(room);
+      let idx = 0;
+      if (!fifoNext && room.queue.length > 1) {
+        idx = await pickNextTrackIndex(room);
+      }
       [next] = room.queue.splice(idx, 1);
-      if (idx !== 0) {
+      if (!fifoNext && idx !== 0) {
         console.log(
           `[${room.code}] AI picked queue[${idx}] over FIFO: ${next.name}`
         );
@@ -941,6 +966,30 @@ Return 1-3 queries.
     }
   });
 
+  socket.on('vote_skip', () => {
+    const code = socket.data.roomCode;
+    const userId = socket.data.userId;
+    if (!code || !userId) return;
+    const room = rooms.get(code);
+    if (!room || !room.currentTrack) return;
+    if (!room.members.has(userId)) return;
+    if (!Array.isArray(room.skipVotes)) room.skipVotes = [];
+    if (!room.skipVotes.includes(userId)) room.skipVotes.push(userId);
+    emitNowPlaying(room);
+    maybeAdvanceFromSkipVotes(room);
+  });
+
+  socket.on('unvote_skip', () => {
+    const code = socket.data.roomCode;
+    const userId = socket.data.userId;
+    if (!code || !userId) return;
+    const room = rooms.get(code);
+    if (!room || !room.currentTrack) return;
+    if (!Array.isArray(room.skipVotes)) room.skipVotes = [];
+    room.skipVotes = room.skipVotes.filter((id) => id !== userId);
+    emitNowPlaying(room);
+  });
+
   socket.on('disconnect', () => {
     const { userId, roomCode } = socket.data || {};
     if (!userId || !roomCode) {
@@ -965,6 +1014,13 @@ Return 1-3 queries.
     }
 
     room.members.delete(userId);
+
+    const skipBefore = (room.skipVotes || []).length;
+    room.skipVotes = (room.skipVotes || []).filter((id) => room.members.has(id));
+    if (room.currentTrack && room.skipVotes.length !== skipBefore) {
+      emitNowPlaying(room);
+    }
+    maybeAdvanceFromSkipVotes(room);
 
     io.to(roomCode).emit('user_left', {
       userId,

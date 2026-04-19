@@ -29,16 +29,17 @@ export default function SkipVote({
 
   const serverList = Array.isArray(skipVotes) ? skipVotes : null;
 
+  // Empty [] is truthy in JS — only treat server as authoritative when it
+  // explicitly includes us; otherwise keep optimistic localVoted after click.
   const voted = useMemo(() => {
-    if (serverList && myUserId) return serverList.includes(myUserId);
+    if (myUserId && serverList && serverList.includes(myUserId)) return true;
     return localVoted;
   }, [serverList, myUserId, localVoted]);
 
-  const votes = serverList
-    ? serverList.length
-    : localVoted
-    ? 1
-    : 0;
+  const votes = useMemo(() => {
+    if (serverList != null) return serverList.length;
+    return localVoted ? 1 : 0;
+  }, [serverList, localVoted]);
 
   const threshold = Math.max(1, Math.ceil((memberCount || 1) / 2));
 
