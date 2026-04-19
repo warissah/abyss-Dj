@@ -22,6 +22,87 @@ const ENERGY_WINDOW_MS = 60_000;
 const ENERGY_PER_EVENT = 12;
 const ENERGY_REFRESH_MS = 2000;
 
+// Host-only autopilot safety net. If the queue drains AND the server's AI
+// extender can't refill it fast enough (cooldown, network hiccup, whatever),
+// the host client drops in a canned vibe-matched request via the existing
+// add_song socket event. Keeps the music alive during demos without touching
+// the backend.
+const AUTOPILOT_TICK_MS = 2000;
+const AUTOPILOT_EMPTY_THRESHOLD_MS = 8000;
+const AUTOPILOT_COOLDOWN_MS = 12_000;
+const FALLBACK_TRACKS = {
+  chill: [
+    "Weightless Marconi Union",
+    "Porcelain Moby",
+    "Sunset Lover Petit Biscuit",
+    "Night Owl Galimatias",
+    "Intro The xx",
+  ],
+  hype: [
+    "Stronger Kanye West",
+    "Till I Collapse Eminem",
+    "Lose Yourself Eminem",
+    "Power Kanye West",
+    "Remember The Name Fort Minor",
+  ],
+  party: [
+    "Uptown Funk Bruno Mars",
+    "Dance Monkey Tones and I",
+    "Don't Stop the Music Rihanna",
+    "Blinding Lights The Weeknd",
+    "I Wanna Dance with Somebody Whitney Houston",
+  ],
+  pop: [
+    "Shake It Off Taylor Swift",
+    "As It Was Harry Styles",
+    "Levitating Dua Lipa",
+    "Watermelon Sugar Harry Styles",
+    "Good 4 U Olivia Rodrigo",
+  ],
+  trap: [
+    "Mask Off Future",
+    "Sicko Mode Travis Scott",
+    "Humble Kendrick Lamar",
+    "Goosebumps Travis Scott",
+    "Redbone Childish Gambino",
+  ],
+  edm: [
+    "Animals Martin Garrix",
+    "Titanium David Guetta",
+    "Levels Avicii",
+    "Wake Me Up Avicii",
+    "Clarity Zedd",
+  ],
+  rock: [
+    "Mr Brightside The Killers",
+    "Sweet Child O Mine Guns N Roses",
+    "Don't Stop Believin Journey",
+    "Smells Like Teen Spirit Nirvana",
+    "Bohemian Rhapsody Queen",
+  ],
+  rnb: [
+    "Die For You The Weeknd",
+    "Location Khalid",
+    "Redbone Childish Gambino",
+    "Come Through and Chill Miguel",
+    "Best Part Daniel Caesar",
+  ],
+  sad: [
+    "Someone Like You Adele",
+    "Mad World Gary Jules",
+    "The Night We Met Lord Huron",
+    "Fix You Coldplay",
+    "Skinny Love Bon Iver",
+  ],
+  default: [
+    "Blinding Lights The Weeknd",
+    "Uptown Funk Bruno Mars",
+    "As It Was Harry Styles",
+    "Levitating Dua Lipa",
+    "Good 4 U Olivia Rodrigo",
+  ],
+};
+
 // Orchestrator. Owns the socket connection + shared room state, then hands
 // off rendering to either HostView (full dashboard) or GuestView (minimal
 // add-a-song UI) based on the identity assigned by the server.
@@ -64,6 +145,47 @@ export default function Room({ code }) {
     const id = setInterval(tick, ENERGY_REFRESH_MS);
     return () => clearInterval(id);
   }, []);
+
+  // Host-only queue autopilot. Watches the queue, and if it sits empty for
+  // longer than AUTOPILOT_EMPTY_THRESHOLD_MS, drops in a canned vibe-matched
+  // song via add_song. Cooldown prevents runaway stacking when the server
+  // briefly catches up. Only the current host runs this so guests never
+  // double-fire.
+  useEffect(() => {
+    if (!me?.userId || !state.hostUserId || state.hostUserId !== me.userId) {
+      return undefined;
+    }
+
+    let emptySince = 0;
+    let lastFillAt = 0;
+
+    const tick = () => {
+      const s = stateRef.current;
+      const now = Date.now();
+      const queueEmpty = !s.queue || s.queue.length === 0;
+
+      if (!queueEmpty) {
+        emptySince = 0;
+        return;
+      }
+      if (emptySince === 0) {
+        emptySince = now;
+        return;
+      }
+      if (now - emptySince < AUTOPILOT_EMPTY_THRESHOLD_MS) return;
+      if (now - lastFillAt < AUTOPILOT_COOLDOWN_MS) return;
+
+      const vibeKey =
+        s.vibe && FALLBACK_TRACKS[s.vibe] ? s.vibe : "default";
+      const pool = FALLBACK_TRACKS[vibeKey];
+      const query = pool[Math.floor(Math.random() * pool.length)];
+      socket.emit("add_song", { query });
+      lastFillAt = now;
+    };
+
+    const id = setInterval(tick, AUTOPILOT_TICK_MS);
+    return () => clearInterval(id);
+  }, [me?.userId, state.hostUserId]);
 
   useEffect(() => {
     // Send join_room every time the socket (re)connects. This covers:

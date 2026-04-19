@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { socket } from "../socket.js";
+import OceanAmbience from "./OceanAmbience.jsx";
 
 const ADD_CONFIRM_MS = 2500;
+const HEART_TAP_MIN_MS = 200;
+const FLOATER_LIFE_MS = 800;
 
 // Minimal guest experience: see what's playing right now (read-only, no audio
 // on this device) and drop song requests into the shared queue. No queue
@@ -11,8 +14,13 @@ export default function GuestView({ code, me, state, bubbles, error }) {
   const [query, setQuery] = useState("");
   const [lastAdded, setLastAdded] = useState("");
   const [errMsg, setErrMsg] = useState("");
+  const [myTaps, setMyTaps] = useState(0);
+  const [heartPopKey, setHeartPopKey] = useState(0);
+  const [floaters, setFloaters] = useState([]);
   const confirmTimerRef = useRef(null);
   const errTimerRef = useRef(null);
+  const lastTapRef = useRef(0);
+  const floaterIdRef = useRef(0);
 
   useEffect(() => {
     const onAddError = ({ error: msg }) => {
@@ -45,8 +53,53 @@ export default function GuestView({ code, me, state, bubbles, error }) {
   const nextUp = state.queue?.[0];
   const nextIsMine = !!(nextUp && myId && nextUp.addedBy === myId);
 
+  useEffect(() => {
+    setMyTaps(0);
+    setFloaters([]);
+  }, [np?.id]);
+
+  const tapHeart = () => {
+    if (!np) return;
+    const now = Date.now();
+    if (now - lastTapRef.current < HEART_TAP_MIN_MS) return;
+    lastTapRef.current = now;
+    setMyTaps((n) => n + 1);
+    setHeartPopKey((k) => k + 1);
+    floaterIdRef.current += 1;
+    const id = floaterIdRef.current;
+    setFloaters((prev) => [...prev, { id }]);
+    setTimeout(() => {
+      setFloaters((prev) => prev.filter((f) => f.id !== id));
+    }, FLOATER_LIFE_MS);
+  };
+
+  const heartDisabled = !np;
+
   return (
     <div className="ocean">
+      <OceanAmbience />
+      <div className="guestHeartDock">
+        <button
+          type="button"
+          className={`guestHeartBtn${heartDisabled ? " guestHeartBtn--disabled" : ""}`}
+          onClick={tapHeart}
+          disabled={heartDisabled}
+          aria-label="Send a heart"
+        >
+          <span key={heartPopKey} className="guestHeartGlyph">
+            ♥
+          </span>
+          {floaters.map((f) => (
+            <span key={f.id} className="guestHeartFloater">
+              +1
+            </span>
+          ))}
+        </button>
+        {myTaps > 0 && (
+          <div className="guestHeartCount">{myTaps}</div>
+        )}
+      </div>
+
       <div className="bubbles">
         {bubbles.map((u) => (
           <div

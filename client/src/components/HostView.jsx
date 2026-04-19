@@ -5,6 +5,9 @@ import LikeButton from "./LikeButton.jsx";
 import SkipVote from "./SkipVote.jsx";
 import AiDjChatter from "./AiDjChatter.jsx";
 import VibeOrb from "./VibeOrb.jsx";
+import EnergyBar from "./EnergyBar.jsx";
+import FakeActivityFeed from "./FakeActivityFeed.jsx";
+import OceanAmbience from "./OceanAmbience.jsx";
 import { QRCodeSVG } from "qrcode.react";
 import { useMemo, useState } from "react";
 
@@ -30,6 +33,7 @@ export default function HostView({
 
   return (
     <div className="ocean">
+      <OceanAmbience />
       <VibeOrb vibe={state.vibe} energy={energy} />
 
       <div className="bubbles">
@@ -55,11 +59,14 @@ export default function HostView({
 
       <div className="topBar">
         <h2>🌊 VIBE: {state.vibe}</h2>
+        <EnergyBar energy={energy} vibe={state.vibe} />
         <div className="topBarMeta">
           Room {code} · {state.members.length}{" "}
           {state.members.length === 1 ? "listener" : "listeners"} · host
         </div>
       </div>
+
+      <FakeActivityFeed />
 
       <button
         className="sharePill"
